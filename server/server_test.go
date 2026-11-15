@@ -1,0 +1,283 @@
+package server
+
+import (
+	"errors"
+	"net"
+	"strings"
+	"testing"
+	"time"
+)
+
+const ioTimeout = 2 * time.Second
+
+// startServer runs a server on a random local port and stops it when the
+// test ends. The clock is fixed so that output is predictable.
+func startServer(t *testing.T, maxConns int) (*Server, string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := New(maxConns)
+	srv.now = func() time.Time { return fixedTime }
+
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ln) }()
+
+	t.Cleanup(func() {
+		_ = srv.Close()
+		if err := <-done; !errors.Is(err, ErrServerClosed) {
+			t.Errorf("Serve returned %v, want ErrServerClosed", err)
+		}
+	})
+	return srv, ln.Addr().String()
+}
+
+// testClient is a minimal nc replacement that remembers unread output.
+type testClient struct {
+	t       *testing.T
+	conn    net.Conn
+	pending string
+}
+
+func dial(t *testing.T, addr string) *testClient {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return &testClient{t: t, conn: conn}
+}
+
+// join connects and enters name, waiting until the chat prompt appears.
+func join(t *testing.T, addr, name string) *testClient {
+	t.Helper()
+	c := dial(t, addr)
+	c.expect(namePrompt)
+	c.send(name)
+	c.expect(prompt(fixedTime, name))
+	return c
+}
+
+func (c *testClient) send(line string) {
+	c.t.Helper()
+	if _, err := c.conn.Write([]byte(line + "\n")); err != nil {
+		c.t.Fatalf("write: %v", err)
+	}
+}
+
+// expect reads until sub appears and consumes output up to and including it.
+func (c *testClient) expect(sub string) string {
+	c.t.Helper()
+	deadline := time.Now().Add(ioTimeout)
+	buf := make([]byte, 4096)
+	for !strings.Contains(c.pending, sub) {
+		_ = c.conn.SetReadDeadline(deadline)
+		n, err := c.conn.Read(buf)
+		c.pending += string(buf[:n])
+		if err != nil && !strings.Contains(c.pending, sub) {
+			c.t.Fatalf("waiting for %q: %v\nreceived: %q", sub, err, c.pending)
+		}
+	}
+	i := strings.Index(c.pending, sub) + len(sub)
+	out := c.pending[:i]
+	c.pending = c.pending[i:]
+	return out
+}
+
+// drain returns everything that arrives within d.
+func (c *testClient) drain(d time.Duration) string {
+	c.t.Helper()
+	buf := make([]byte, 4096)
+	_ = c.conn.SetReadDeadline(time.Now().Add(d))
+	for {
+		n, err := c.conn.Read(buf)
+		c.pending += string(buf[:n])
+		if err != nil {
+			break
+		}
+	}
+	out := c.pending
+	c.pending = ""
+	return out
+}
+
+// expectClosed waits until the server closes the connection.
+func (c *testClient) expectClosed() {
+	c.t.Helper()
+	buf := make([]byte, 4096)
+	_ = c.conn.SetReadDeadline(time.Now().Add(ioTimeout))
+	for {
+		n, err := c.conn.Read(buf)
+		c.pending += string(buf[:n])
+		if err == nil {
+			continue
+		}
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			c.t.Fatal("connection was not closed by the server")
+		}
+		return
+	}
+}
+
+func TestGreetingAndNamePrompt(t *testing.T) {
+	_, addr := startServer(t, 10)
+	c := dial(t, addr)
+
+	got := c.expect(namePrompt)
+	if !strings.HasPrefix(got, welcomeBanner) {
+		t.Errorf("greeting = %q, want it to start with the banner", got)
+	}
+}
+
+func TestEmptyNameIsRejected(t *testing.T) {
+	_, addr := startServer(t, 10)
+	c := dial(t, addr)
+	c.expect(namePrompt)
+
+	c.send("   ")
+	c.expect("Invalid name: " + ErrNameEmpty.Error())
+	c.expect(namePrompt)
+
+	c.send("Yenlik")
+	c.expect(prompt(fixedTime, "Yenlik"))
+}
+
+func TestDuplicateNameIsRejected(t *testing.T) {
+	_, addr := startServer(t, 10)
+	join(t, addr, "Yenlik")
+
+	c := dial(t, addr)
+	c.expect(namePrompt)
+	c.send("yenlik")
+	c.expect("Invalid name: " + ErrNameTaken.Error())
+}
+
+func TestJoinIsAnnouncedToOthers(t *testing.T) {
+	_, addr := startServer(t, 10)
+	yenlik := join(t, addr, "Yenlik")
+	lee := join(t, addr, "Lee")
+
+	yenlik.expect(formatSystem(fixedTime, "Lee has joined our chat."))
+
+	// The newcomer does not get a notice about themself.
+	if out := lee.drain(100 * time.Millisecond); strings.Contains(out, "has joined") {
+		t.Errorf("joining client received its own join notice: %q", out)
+	}
+}
+
+func TestMessagesAreBroadcastButNotEchoed(t *testing.T) {
+	_, addr := startServer(t, 10)
+	yenlik := join(t, addr, "Yenlik")
+	lee := join(t, addr, "Lee")
+	yenlik.expect("has joined our chat.")
+
+	yenlik.send("hello")
+	lee.expect(formatMessage(fixedTime, "Yenlik", "hello"))
+
+	if out := yenlik.drain(100 * time.Millisecond); strings.Contains(out, "]:hello") {
+		t.Errorf("sender received its own message: %q", out)
+	}
+}
+
+func TestEmptyMessagesAreNotBroadcast(t *testing.T) {
+	_, addr := startServer(t, 10)
+	yenlik := join(t, addr, "Yenlik")
+	lee := join(t, addr, "Lee")
+	yenlik.expect("has joined our chat.")
+
+	yenlik.send("")
+	yenlik.send("   \t ")
+	yenlik.send("real")
+
+	// The first thing Lee receives must be the real message.
+	got := lee.expect("]:real")
+	if strings.Count(got, "[Yenlik]:") != 1 {
+		t.Errorf("empty messages were broadcast: %q", got)
+	}
+}
+
+func TestHistoryIsSentToNewClient(t *testing.T) {
+	_, addr := startServer(t, 10)
+	yenlik := join(t, addr, "Yenlik")
+	yenlik.send("hello")
+	yenlik.send("How are you?")
+	yenlik.expect(prompt(fixedTime, "Yenlik")) // wait until processed
+	yenlik.expect(prompt(fixedTime, "Yenlik"))
+
+	lee := dial(t, addr)
+	lee.expect(namePrompt)
+	lee.send("Lee")
+	want := formatMessage(fixedTime, "Yenlik", "hello") + "\n" +
+		formatMessage(fixedTime, "Yenlik", "How are you?") + "\n" +
+		prompt(fixedTime, "Lee")
+	if got := lee.expect(prompt(fixedTime, "Lee")); got != want {
+		t.Errorf("history = %q, want %q", got, want)
+	}
+}
+
+func TestLeaveIsAnnouncedAndOthersStayConnected(t *testing.T) {
+	_, addr := startServer(t, 10)
+	yenlik := join(t, addr, "Yenlik")
+	lee := join(t, addr, "Lee")
+	bob := join(t, addr, "Bob")
+	yenlik.expect("Bob has joined our chat.")
+	lee.expect("Bob has joined our chat.")
+
+	_ = lee.conn.Close()
+	yenlik.expect(formatSystem(fixedTime, "Lee has left our chat."))
+	bob.expect(formatSystem(fixedTime, "Lee has left our chat."))
+
+	yenlik.send("still here")
+	bob.expect(formatMessage(fixedTime, "Yenlik", "still here"))
+}
+
+func TestDisconnectBeforeNameIsSilent(t *testing.T) {
+	_, addr := startServer(t, 10)
+	yenlik := join(t, addr, "Yenlik")
+
+	anon := dial(t, addr)
+	anon.expect(namePrompt)
+	_ = anon.conn.Close()
+
+	if out := yenlik.drain(150 * time.Millisecond); strings.Contains(out, "left") {
+		t.Errorf("unnamed client produced a leave notice: %q", out)
+	}
+}
+
+func TestConnectionLimit(t *testing.T) {
+	_, addr := startServer(t, 2)
+	join(t, addr, "Yenlik")
+	lee := join(t, addr, "Lee")
+
+	extra := dial(t, addr)
+	extra.expect(chatFullMessage)
+	extra.expectClosed()
+
+	// When somebody leaves, the slot becomes free again.
+	_ = lee.conn.Close()
+	deadline := time.Now().Add(ioTimeout)
+	for {
+		c := dial(t, addr)
+		out := c.expect("\n")
+		if strings.Contains(out, "Welcome to TCP-Chat!") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("slot was not released after a client left")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestCloseDisconnectsClients(t *testing.T) {
+	srv, addr := startServer(t, 10)
+	c := join(t, addr, "Yenlik")
+
+	if err := srv.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	c.expectClosed()
+}

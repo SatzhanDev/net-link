@@ -1,0 +1,11 @@
+# Build artifacts
+/TCPChat
+/net-link
+*.exe
+*.test
+*.out
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
