@@ -30,6 +30,13 @@ func formatSystem(t time.Time, text string) string {
 	return timestamp(t) + "[" + systemName + "]: " + text
 }
 
+// formatSystemNote builds a server note without a timestamp:
+// [System]: text. The subject shows the session profile and the flood
+// warning in exactly this form, unlike join/leave notices.
+func formatSystemNote(text string) string {
+	return "[" + systemName + "]: " + text
+}
+
 // prompt is what a client sees while typing: [2020-01-20 15:48:41][name]:
 func prompt(t time.Time, name string) string {
 	return timestamp(t) + "[" + name + "]:"

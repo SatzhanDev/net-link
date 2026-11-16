@@ -91,7 +91,8 @@ func (s *Server) register(conn net.Conn, scanner *bufio.Scanner) (*participant, 
 // disconnects. Empty (whitespace-only) lines are never broadcast.
 func (s *Server) chat(p *participant, scanner *bufio.Scanner) {
 	for scanner.Scan() {
-		text := sanitize(strings.TrimRight(scanner.Text(), "\r"))
+		// sanitize also strips the '\r' that some clients send before '\n'.
+		text := sanitize(scanner.Text())
 		if strings.TrimSpace(text) == "" {
 			p.enqueue(prompt(s.now(), p.name))
 			continue

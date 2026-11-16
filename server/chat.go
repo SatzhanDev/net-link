@@ -1,6 +1,10 @@
 package server
 
-import "strings"
+import (
+	"strings"
+
+	"net-link/internal/chatprofile"
+)
 
 // This file contains the chat room logic: who is in the room, the message
 // history and how messages are delivered. Network handling lives in
@@ -30,6 +34,9 @@ func (s *Server) join(p *participant) error {
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
+	// Right after the history comes the live session profile.
+	b.WriteString(formatSystemNote(s.profile.Summary(now)))
+	b.WriteString("\n")
 	b.WriteString(prompt(now, p.name))
 	// One enqueue for the whole history, so a long history cannot
 	// overflow the outbox.
@@ -53,6 +60,8 @@ func (s *Server) leave(p *participant) {
 
 // publish stores a chat message and sends it to everyone except the author.
 // The author only gets a fresh prompt: their own text is already on screen.
+// A client that floods the chat also gets a private warning; the message
+// itself is still delivered (the subject only asks for a warning).
 func (s *Server) publish(p *participant, text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -60,7 +69,13 @@ func (s *Server) publish(p *participant, text string) {
 	now := s.now()
 	msg := formatMessage(now, p.name, text)
 	s.history = append(s.history, msg)
+	s.profile.Record(p.name)
 	s.broadcastLocked(msg, p)
+
+	p.recent = chatprofile.RecentMessages(p.recent, now, chatprofile.FloodWindow)
+	if chatprofile.IsFlooding(len(p.recent), chatprofile.FloodLimit) {
+		p.enqueue(formatSystemNote(chatprofile.FloodWarning) + "\n")
+	}
 	p.enqueue(prompt(now, p.name))
 }
 

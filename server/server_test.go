@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"net-link/internal/chatprofile"
 )
 
 const ioTimeout = 2 * time.Second
@@ -20,6 +22,9 @@ func startServer(t *testing.T, maxConns int) (*Server, string) {
 	}
 	srv := New(maxConns)
 	srv.now = func() time.Time { return fixedTime }
+	// The session started one minute before the fixed clock, so the
+	// message count equals the rate per minute in these tests.
+	srv.profile = chatprofile.NewSession(fixedTime.Add(-time.Minute))
 
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(ln) }()
@@ -212,9 +217,67 @@ func TestHistoryIsSentToNewClient(t *testing.T) {
 	lee.send("Lee")
 	want := formatMessage(fixedTime, "Yenlik", "hello") + "\n" +
 		formatMessage(fixedTime, "Yenlik", "How are you?") + "\n" +
+		"[System]: Session profile | pace: quiet | top talker: Yenlik (2 msgs) | total: 2 msgs\n" +
 		prompt(fixedTime, "Lee")
 	if got := lee.expect(prompt(fixedTime, "Lee")); got != want {
 		t.Errorf("history = %q, want %q", got, want)
+	}
+}
+
+func TestProfileForFirstClient(t *testing.T) {
+	_, addr := startServer(t, 10)
+	c := dial(t, addr)
+	c.expect(namePrompt)
+	c.send("Yenlik")
+
+	want := "[System]: Session profile | pace: quiet | no messages yet\n" + prompt(fixedTime, "Yenlik")
+	if got := c.expect(prompt(fixedTime, "Yenlik")); got != want {
+		t.Errorf("greeting after name = %q, want %q", got, want)
+	}
+}
+
+func TestProfileShowsTopTalkerAndPace(t *testing.T) {
+	_, addr := startServer(t, 10)
+	yenlik := join(t, addr, "Yenlik")
+	lee := join(t, addr, "Lee")
+	yenlik.expect("Lee has joined our chat.")
+
+	// 4 messages from Yenlik, 1 from Lee: 5 messages in one minute -> active.
+	for _, m := range []string{"a", "b", "c", "d"} {
+		yenlik.send(m)
+		lee.expect("]:" + m)
+	}
+	lee.send("e")
+	yenlik.expect("]:e")
+
+	bob := dial(t, addr)
+	bob.expect(namePrompt)
+	bob.send("Bob")
+	bob.expect("[System]: Session profile | pace: active | top talker: Yenlik (4 msgs) | total: 5 msgs\n")
+}
+
+func TestFloodWarning(t *testing.T) {
+	_, addr := startServer(t, 10)
+	yenlik := join(t, addr, "Yenlik")
+	lee := join(t, addr, "Lee")
+	yenlik.expect("Lee has joined our chat.")
+
+	warning := "[System]: " + chatprofile.FloodWarning
+
+	// The clock is frozen, so all messages fall into the same 30s window.
+	for i := 1; i <= chatprofile.FloodLimit; i++ {
+		yenlik.send("spam")
+		lee.expect("]:spam")
+	}
+	if out := yenlik.drain(100 * time.Millisecond); strings.Contains(out, warning) {
+		t.Fatalf("warning sent after only %d messages: %q", chatprofile.FloodLimit, out)
+	}
+
+	yenlik.send("one more")
+	yenlik.expect(warning)
+	// The message is still delivered, and the warning is private.
+	if out := lee.expect("]:one more"); strings.Contains(out, warning) {
+		t.Errorf("flood warning leaked to another client: %q", out)
 	}
 }
 

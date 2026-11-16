@@ -28,6 +28,10 @@ type participant struct {
 	outbox   chan string
 	done     chan struct{}
 	stopOnce sync.Once
+
+	// recent holds the times of this client's messages inside the flood
+	// window. It is only touched under Server.mu.
+	recent []time.Time
 }
 
 func newParticipant(name string, conn net.Conn) *participant {

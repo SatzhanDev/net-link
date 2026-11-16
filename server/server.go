@@ -8,6 +8,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"net-link/internal/chatprofile"
 )
 
 // DefaultMaxConnections is the connection limit required by the subject.
@@ -25,11 +27,11 @@ const chatFullMessage = "Chat is full, please try again later.\n"
 //   - one goroutine per connection reads from it;
 //   - one goroutine per named participant writes to it (see participant);
 //   - slots is a buffered channel used as a semaphore for the connection limit;
-//   - mu protects members, history and the bookkeeping maps.
+//   - mu protects members, history, the profiler counters and the
+//     bookkeeping maps.
 type Server struct {
-	maxConns int
-	slots    chan struct{}
-	now      func() time.Time // replaceable in tests
+	slots chan struct{}
+	now   func() time.Time // replaceable in tests
 
 	mu      sync.Mutex
 	ln      net.Listener
@@ -37,6 +39,7 @@ type Server struct {
 	conns   map[net.Conn]struct{}     // every open connection, named or not
 	members map[*participant]struct{} // clients that have joined the chat
 	history []string                  // chat messages, oldest first
+	profile *chatprofile.Session      // activity counters for the profiler
 
 	wg sync.WaitGroup
 }
@@ -47,12 +50,14 @@ func New(maxConns int) *Server {
 	if maxConns <= 0 {
 		maxConns = DefaultMaxConnections
 	}
+	// The session (for the pace calculation) starts when the server is
+	// created, i.e. right before it starts listening.
 	return &Server{
-		maxConns: maxConns,
-		slots:    make(chan struct{}, maxConns),
-		now:      time.Now,
-		conns:    make(map[net.Conn]struct{}),
-		members:  make(map[*participant]struct{}),
+		slots:   make(chan struct{}, maxConns),
+		now:     time.Now,
+		conns:   make(map[net.Conn]struct{}),
+		members: make(map[*participant]struct{}),
+		profile: chatprofile.NewSession(time.Now()),
 	}
 }
 
