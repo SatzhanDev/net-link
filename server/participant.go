@@ -26,7 +26,8 @@ type participant struct {
 	conn net.Conn
 
 	outbox   chan string
-	done     chan struct{}
+	done     chan struct{} // closed by stop: "flush and exit"
+	finished chan struct{} // closed by writeLoop when it has exited
 	stopOnce sync.Once
 
 	// recent holds the times of this client's messages inside the flood
@@ -36,10 +37,11 @@ type participant struct {
 
 func newParticipant(name string, conn net.Conn) *participant {
 	return &participant{
-		name:   name,
-		conn:   conn,
-		outbox: make(chan string, outboxSize),
-		done:   make(chan struct{}),
+		name:     name,
+		conn:     conn,
+		outbox:   make(chan string, outboxSize),
+		done:     make(chan struct{}),
+		finished: make(chan struct{}),
 	}
 }
 
@@ -56,23 +58,54 @@ func (p *participant) enqueue(msg string) {
 // writeLoop drains the outbox until stop is called or a write fails.
 // On a write error the connection is closed, which makes the reader
 // goroutine return and the participant leave the chat.
+// finished is closed when the loop exits.
 func (p *participant) writeLoop() {
+	defer close(p.finished)
 	for {
 		select {
 		case msg := <-p.outbox:
-			_ = p.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-			if _, err := io.WriteString(p.conn, msg); err != nil {
-				log.Printf("write to %q failed: %v", p.name, err)
-				_ = p.conn.Close()
+			if !p.write(msg) {
 				return
 			}
 		case <-p.done:
+			p.flush()
 			return
 		}
 	}
 }
 
-// stop terminates the writer goroutine. It is idempotent.
+// flush sends whatever is still queued. It is called on stop so that a
+// client that half-closes its side (e.g. `echo name | nc -N`) still gets
+// the history, the profile and every message queued before it left.
+func (p *participant) flush() {
+	for {
+		select {
+		case msg := <-p.outbox:
+			if !p.write(msg) {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+// write sends one message, bounded by writeTimeout so that a client that
+// stopped reading cannot block the goroutine forever.
+func (p *participant) write(msg string) bool {
+	_ = p.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	if _, err := io.WriteString(p.conn, msg); err != nil {
+		log.Printf("write to %q failed: %v", p.name, err)
+		_ = p.conn.Close()
+		return false
+	}
+	return true
+}
+
+// stop asks the writer goroutine to flush the outbox and exit, then waits
+// for it. It is idempotent. Nothing may be enqueued after the participant
+// has left the chat, so the flush sees everything.
 func (p *participant) stop() {
 	p.stopOnce.Do(func() { close(p.done) })
+	<-p.finished
 }

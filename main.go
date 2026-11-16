@@ -1,9 +1,12 @@
-// Command net-link is a NetCat-like TCP group chat server.
+// Command net-link is a NetCat-like TCP group chat.
 //
 // Usage:
 //
-//	go run .          # listens on the default port 8989
-//	go run . 2525     # listens on port 2525
+//	go run .                    # server on the default port 8989
+//	go run . 2525               # server on port 2525
+//	go run . -c localhost 2525  # client connected to localhost:2525
+//
+// Any other combination of arguments prints the usage message.
 package main
 
 import (
@@ -12,18 +15,34 @@ import (
 	"net"
 	"os"
 
+	"net-link/client"
 	"net-link/server"
 )
 
 const (
 	defaultPort  = "8989"
 	usageMessage = "[USAGE]: ./TCPChat $port"
+	clientFlag   = "-c"
 )
 
 var errUsage = errors.New("invalid arguments")
 
+type mode int
+
+const (
+	serverMode mode = iota
+	clientMode
+)
+
+// config is the result of parsing the command line.
+type config struct {
+	mode mode
+	host string // client mode only
+	port string
+}
+
 func main() {
-	port, err := parseArgs(os.Args[1:])
+	cfg, err := parseArgs(os.Args[1:])
 	if err != nil {
 		// The subject shows the usage line followed by a normal prompt,
 		// so we print it and exit cleanly instead of with a failure code.
@@ -31,34 +50,67 @@ func main() {
 		return
 	}
 
+	switch cfg.mode {
+	case clientMode:
+		os.Exit(runClient(cfg.host, cfg.port))
+	default:
+		os.Exit(runServer(cfg.port))
+	}
+}
+
+func runServer(port string) int {
 	ln, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to listen on port %s: %v\n", port, err)
-		os.Exit(1)
+		return 1
 	}
 	fmt.Printf("Listening on the port :%s\n", port)
 
 	srv := server.New(server.DefaultMaxConnections)
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, server.ErrServerClosed) {
 		fmt.Fprintf(os.Stderr, "server stopped: %v\n", err)
-		os.Exit(1)
+		return 1
+	}
+	return 0
+}
+
+func runClient(host, port string) int {
+	c, err := client.Dial(net.JoinHostPort(host, port), client.DefaultDialTimeout)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+
+	err = c.Run(os.Stdin, os.Stdout)
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, client.ErrConnectionClosed):
+		fmt.Fprintln(os.Stderr, "\nConnection closed by server.")
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "\nconnection error: %v\n", err)
+		return 1
 	}
 }
 
-// parseArgs returns the port to listen on.
-// No arguments -> default port; exactly one valid port -> that port;
-// anything else is a usage error.
-func parseArgs(args []string) (string, error) {
-	switch len(args) {
-	case 0:
-		return defaultPort, nil
-	case 1:
-		if !isValidPort(args[0]) {
-			return "", errUsage
-		}
-		return args[0], nil
+// parseArgs decides between server and client mode.
+//
+//	[]                 -> server on the default port
+//	[port]             -> server on port
+//	["-c", host, port] -> client
+//
+// Everything else is a usage error.
+func parseArgs(args []string) (config, error) {
+	switch {
+	case len(args) == 0:
+		return config{mode: serverMode, port: defaultPort}, nil
+	case len(args) == 1 && isValidPort(args[0]):
+		return config{mode: serverMode, port: args[0]}, nil
+	case len(args) == 3 && args[0] == clientFlag && args[1] != "" && isValidPort(args[2]):
+		return config{mode: clientMode, host: args[1], port: args[2]}, nil
 	default:
-		return "", errUsage
+		return config{}, errUsage
 	}
 }
 

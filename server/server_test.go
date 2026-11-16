@@ -335,6 +335,25 @@ func TestConnectionLimit(t *testing.T) {
 	}
 }
 
+// A client may send its input and half-close the connection right away
+// (`echo ... | nc -N`, or our client on Ctrl+D). Everything queued for it
+// before it left must still be delivered.
+func TestQueuedOutputIsFlushedOnHalfClose(t *testing.T) {
+	_, addr := startServer(t, 10)
+	c := dial(t, addr)
+	if _, err := c.conn.Write([]byte("Yenlik\nhello\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := c.conn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+
+	c.expect("[System]: Session profile | pace: quiet | no messages yet\n")
+	c.expect(prompt(fixedTime, "Yenlik")) // after the name
+	c.expect(prompt(fixedTime, "Yenlik")) // after "hello"
+	c.expectClosed()
+}
+
 func TestCloseDisconnectsClients(t *testing.T) {
 	srv, addr := startServer(t, 10)
 	c := join(t, addr, "Yenlik")
