@@ -140,6 +140,19 @@ func (s *Session) Record(name string) {
 	s.counts[name]++
 }
 
+// Rename moves the message count of oldName to newName, so a client keeps
+// their score after changing their name. If newName already has messages
+// (someone used it before and left), the counts are added together.
+func (s *Session) Rename(oldName, newName string) {
+	if oldName == newName {
+		return
+	}
+	if n, ok := s.counts[oldName]; ok {
+		s.counts[newName] += n
+		delete(s.counts, oldName)
+	}
+}
+
 // Summary returns the live session profile at the moment now.
 func (s *Session) Summary(now time.Time) string {
 	elapsed := now.Sub(s.start).Minutes()

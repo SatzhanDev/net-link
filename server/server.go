@@ -27,8 +27,8 @@ const chatFullMessage = "Chat is full, please try again later.\n"
 //   - one goroutine per connection reads from it;
 //   - one goroutine per named participant writes to it (see participant);
 //   - slots is a buffered channel used as a semaphore for the connection limit;
-//   - mu protects members, history, the profiler counters and the
-//     bookkeeping maps.
+//   - mu protects members, history, the profiler counters, the chat log
+//     and the bookkeeping maps.
 type Server struct {
 	slots chan struct{}
 	now   func() time.Time // replaceable in tests
@@ -40,8 +40,23 @@ type Server struct {
 	members map[*participant]struct{} // clients that have joined the chat
 	history []string                  // chat messages, oldest first
 	profile *chatprofile.Session      // activity counters for the profiler
+	chatLog *log.Logger               // optional chat log (see SetChatLog)
 
 	wg sync.WaitGroup
+}
+
+// SetChatLog makes the server write every chat event (messages, joins,
+// leaves, renames, flood warnings) to w, one line per event, in the same
+// format clients see. Call it before Serve. A nil w disables the log.
+func (s *Server) SetChatLog(w io.Writer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if w == nil {
+		s.chatLog = nil
+		return
+	}
+	// No prefix and no flags: every line already carries its timestamp.
+	s.chatLog = log.New(w, "", 0)
 }
 
 // New creates a server that accepts at most maxConns simultaneous connections.

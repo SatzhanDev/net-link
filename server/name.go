@@ -14,6 +14,7 @@ var (
 	ErrNameInvalid  = errors.New("name cannot contain '[' or ']'")
 	ErrNameReserved = errors.New("this name is reserved")
 	ErrNameTaken    = errors.New("this name is already taken")
+	ErrNameSame     = errors.New("this is already your name")
 )
 
 // validateName checks the format of a name. Uniqueness is checked by the

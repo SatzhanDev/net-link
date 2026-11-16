@@ -87,6 +87,9 @@ func (s *Server) register(conn net.Conn, scanner *bufio.Scanner) (*participant, 
 	}
 }
 
+// nameCommand is the chat command for changing your name: /name NewName
+const nameCommand = "/name"
+
 // chat reads lines from the client and publishes them until the client
 // disconnects. Empty (whitespace-only) lines are never broadcast.
 func (s *Server) chat(p *participant, scanner *bufio.Scanner) {
@@ -97,6 +100,28 @@ func (s *Server) chat(p *participant, scanner *bufio.Scanner) {
 			p.enqueue(prompt(s.now(), p.name))
 			continue
 		}
+		if newName, ok := parseNameCommand(text); ok {
+			if err := s.rename(p, newName); err != nil {
+				p.enqueue(formatSystemNote("Cannot change name: "+err.Error()+". Usage: /name NewName") +
+					"\n" + prompt(s.now(), p.name))
+			}
+			continue
+		}
 		s.publish(p, text)
 	}
+}
+
+// parseNameCommand recognises "/name NewName". It returns the trimmed new
+// name (possibly empty, which rename then rejects) and true for a command,
+// or false for an ordinary message. "/names" or "/nameX" are ordinary
+// messages.
+func parseNameCommand(text string) (string, bool) {
+	text = strings.TrimSpace(text)
+	if text == nameCommand {
+		return "", true
+	}
+	if rest, ok := strings.CutPrefix(text, nameCommand+" "); ok {
+		return strings.TrimSpace(rest), true
+	}
+	return "", false
 }

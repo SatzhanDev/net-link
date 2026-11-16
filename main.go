@@ -23,6 +23,7 @@ const (
 	defaultPort  = "8989"
 	usageMessage = "[USAGE]: ./TCPChat $port"
 	clientFlag   = "-c"
+	chatLogFile  = "chat.log" // created in the current directory
 )
 
 var errUsage = errors.New("invalid arguments")
@@ -67,6 +68,17 @@ func runServer(port string) int {
 	fmt.Printf("Listening on the port :%s\n", port)
 
 	srv := server.New(server.DefaultMaxConnections)
+
+	// Bonus: keep all chat events in a file. The chat still works if the
+	// file cannot be opened, so this is a warning, not a fatal error.
+	logFile, err := os.OpenFile(chatLogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: chat log disabled: %v\n", err)
+	} else {
+		defer logFile.Close()
+		srv.SetChatLog(logFile)
+	}
+
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, server.ErrServerClosed) {
 		fmt.Fprintf(os.Stderr, "server stopped: %v\n", err)
 		return 1

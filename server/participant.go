@@ -95,7 +95,9 @@ func (p *participant) flush() {
 func (p *participant) write(msg string) bool {
 	_ = p.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	if _, err := io.WriteString(p.conn, msg); err != nil {
-		log.Printf("write to %q failed: %v", p.name, err)
+		// The remote address is used instead of p.name: the name may be
+		// changed by /name, and this goroutine does not hold Server.mu.
+		log.Printf("write to %s failed: %v", p.conn.RemoteAddr(), err)
 		_ = p.conn.Close()
 		return false
 	}

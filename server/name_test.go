@@ -26,3 +26,27 @@ func TestValidateName(t *testing.T) {
 		}
 	}
 }
+
+func TestParseNameCommand(t *testing.T) {
+	tests := []struct {
+		text     string
+		wantName string
+		wantOK   bool
+	}{
+		{"/name Lee", "Lee", true},
+		{"  /name   Lee  ", "Lee", true},
+		{"/name", "", true},
+		{"/name   ", "", true},
+		{"/name Lee Brown", "Lee Brown", true},
+		{"/names", "", false},
+		{"/nameLee", "", false},
+		{"hello /name Lee", "", false},
+		{"hello", "", false},
+	}
+	for _, tt := range tests {
+		name, ok := parseNameCommand(tt.text)
+		if name != tt.wantName || ok != tt.wantOK {
+			t.Errorf("parseNameCommand(%q) = (%q, %v), want (%q, %v)", tt.text, name, ok, tt.wantName, tt.wantOK)
+		}
+	}
+}

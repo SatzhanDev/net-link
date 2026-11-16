@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -362,4 +363,117 @@ func TestCloseDisconnectsClients(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	c.expectClosed()
+}
+
+func TestRenameIsAnnounced(t *testing.T) {
+	_, addr := startServer(t, 10)
+	yenlik := join(t, addr, "Yenlik")
+	lee := join(t, addr, "Lee")
+	yenlik.expect("Lee has joined our chat.")
+
+	notice := formatSystem(fixedTime, "Lee has changed their name to Leo.")
+	lee.send("/name Leo")
+	lee.expect(notice)                   // the user sees it worked
+	lee.expect(prompt(fixedTime, "Leo")) // and gets a prompt with the new name
+	yenlik.expect(notice)
+
+	// The command itself is not a chat message, the next message uses the new name.
+	lee.send("hi")
+	if got := yenlik.expect("]:hi"); strings.Contains(got, "/name") || !strings.Contains(got, "[Leo]:hi") {
+		t.Errorf("unexpected output after rename: %q", got)
+	}
+
+	// The old name is free again.
+	join(t, addr, "Lee")
+}
+
+func TestRenameErrors(t *testing.T) {
+	_, addr := startServer(t, 10)
+	yenlik := join(t, addr, "Yenlik")
+	lee := join(t, addr, "Lee")
+	yenlik.expect("Lee has joined our chat.")
+
+	for _, tc := range []struct{ cmd, reason string }{
+		{"/name", ErrNameEmpty.Error()},
+		{"/name yenlik", ErrNameTaken.Error()},
+		{"/name Lee", ErrNameSame.Error()},
+		{"/name System", ErrNameReserved.Error()},
+		{"/name [x]", ErrNameInvalid.Error()},
+	} {
+		lee.send(tc.cmd)
+		lee.expect("[System]: Cannot change name: " + tc.reason)
+		lee.expect(prompt(fixedTime, "Lee"))
+	}
+
+	// Changing only the letter case of your own name is allowed.
+	lee.send("/name LEE")
+	yenlik.expect("Lee has changed their name to LEE.")
+
+	if out := yenlik.drain(100 * time.Millisecond); strings.Contains(out, "Cannot change name") {
+		t.Errorf("rename errors must be private: %q", out)
+	}
+}
+
+func TestRenameKeepsProfileCounts(t *testing.T) {
+	_, addr := startServer(t, 10)
+	yenlik := join(t, addr, "Yenlik")
+	lee := join(t, addr, "Lee")
+	yenlik.expect("Lee has joined our chat.")
+
+	lee.send("one")
+	yenlik.expect("]:one")
+	lee.send("two")
+	yenlik.expect("]:two")
+	lee.send("/name Leo")
+	yenlik.expect("changed their name to Leo.")
+
+	bob := dial(t, addr)
+	bob.expect(namePrompt)
+	bob.send("Bob")
+	bob.expect("[System]: Session profile | pace: quiet | top talker: Leo (2 msgs) | total: 2 msgs\n")
+}
+
+// lockedBuffer is a strings.Builder that is safe to read while the server writes.
+type lockedBuffer struct {
+	mu sync.Mutex
+	sb strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sb.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sb.String()
+}
+
+func TestChatLogFile(t *testing.T) {
+	srv, addr := startServer(t, 10)
+	var logBuf lockedBuffer
+	srv.SetChatLog(&logBuf)
+
+	yenlik := join(t, addr, "Yenlik")
+	lee := join(t, addr, "Lee")
+	yenlik.expect("Lee has joined our chat.")
+	yenlik.send("hello")
+	lee.expect("]:hello")
+	lee.send("/name Leo")
+	yenlik.expect("changed their name to Leo.")
+	_ = lee.conn.Close()
+	yenlik.expect("Leo has left our chat.")
+
+	want := strings.Join([]string{
+		formatSystem(fixedTime, "Yenlik has joined our chat."),
+		formatSystem(fixedTime, "Lee has joined our chat."),
+		formatMessage(fixedTime, "Yenlik", "hello"),
+		formatSystem(fixedTime, "Lee has changed their name to Leo."),
+		formatSystem(fixedTime, "Leo has left our chat."),
+	}, "\n") + "\n"
+	if got := logBuf.String(); got != want {
+		t.Errorf("chat log =\n%s\nwant\n%s", got, want)
+	}
 }

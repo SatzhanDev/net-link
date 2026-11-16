@@ -179,3 +179,24 @@ func TestSessionSummary(t *testing.T) {
 		t.Errorf("Summary() = %q, want %q", got, want)
 	}
 }
+
+func TestSessionRename(t *testing.T) {
+	start := time.Date(2020, 1, 20, 15, 0, 0, 0, time.UTC)
+	s := NewSession(start)
+	s.Record("Lee")
+	s.Record("Lee")
+	s.Record("Yenlik")
+
+	s.Rename("Lee", "Leo")
+	s.Rename("Nobody", "Ghost") // unknown name: nothing happens
+	s.Rename("Yenlik", "Yenlik")
+
+	got := s.Summary(start.Add(time.Minute))
+	want := "Session profile | pace: active | top talker: Leo (2 msgs) | total: 3 msgs"
+	if got != want {
+		t.Errorf("Summary() = %q, want %q", got, want)
+	}
+	if _, ok := s.counts["Ghost"]; ok {
+		t.Error("renaming an unknown name must not create an entry")
+	}
+}
